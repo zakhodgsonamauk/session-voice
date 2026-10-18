@@ -1,6 +1,6 @@
 # Spec: Spoken Session Notifications
 
-Full approved design: `conductor/designs/2026-10-18-spoken-session-notify-design.md`.
+Full approved design: `docs/design.md`.
 
 ## Acceptance criteria
 
@@ -12,7 +12,9 @@ Full approved design: `conductor/designs/2026-10-18-spoken-session-notify-design
    direct API calls. Falls back to the first ~10 words of the last reply on failure.
 4. PermissionRequest, Elicitation, AskUserQuestion and StopFailure each speak a fixed phrase.
 5. Two sessions notifying at once take turns.
-6. A turn blocked by another Stop hook does not announce until the session is really idle.
+6. A turn blocked by another Stop hook does not announce until the session is really idle, and
+   does not start a summary run until then.
 7. Hidden Haiku run never triggers a notification of its own.
 8. The hook never blocks or slows Claude (exits immediately, always exit 0).
-9. `cc-sounds` plugin disabled.
+9. The README tells `cc-sounds` users to disable it, so they do not hear both.
+10. Works on Node 20 and later.

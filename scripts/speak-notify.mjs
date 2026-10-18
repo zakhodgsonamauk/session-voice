@@ -89,11 +89,23 @@ export function summarise(lastMessage, run = spawnSync, timeoutMs = 20000) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// A missing record (session closed) counts as idle: the turn is certainly over.
+function isAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
+// Records left saying "busy" by a parked or dead session would otherwise hold the announcement
+// for the full five minutes and then drop it.
+function isBusy(rec) {
+  if (rec?.status !== 'busy' || rec.parkedJobId) return false;
+  return typeof rec.pid !== 'number' || isAlive(rec.pid);
+}
+
+// A missing record (session closed) counts as idle: the turn is certainly over. Giving up after
+// maxMs loses nothing: a session busy that long was sent back to work and will Stop again.
 export async function waitUntilIdle(sessionId, sessionsDir = SESSIONS_DIR, maxMs = 300000, stepMs = 1000) {
   const end = Date.now() + maxMs;
   while (Date.now() < end) {
-    if (findSession(sessionId, sessionsDir)?.status !== 'busy') return true;
+    if (!isBusy(findSession(sessionId, sessionsDir))) return true;
     await sleep(stepMs);
   }
   return false;
@@ -122,16 +134,24 @@ function speak(job, phrase) {
   ], { windowsHide: true, timeout: 180000 });
 }
 
+// On Stop, wait for real idle before asking Haiku, so a turn another Stop hook blocks costs no
+// summary run. The token is checked again afterwards because the summary takes a few seconds.
+export async function announce(job, { say = speak, summary = summarise, sessionsDir = SESSIONS_DIR, stateDir = STATE_DIR } = {}) {
+  if (!job.waitIdle) return say(job, job.phrase ?? summary(job.lastMessage));
+  const current = () => isCurrentToken(job.sessionId, job.token, stateDir);
+  try {
+    if (!(await waitUntilIdle(job.sessionId, sessionsDir)) || !current()) return;
+    const phrase = job.phrase ?? summary(job.lastMessage);
+    if (current()) say(job, phrase);
+  } finally {
+    clearToken(job.sessionId, job.token, stateDir);
+  }
+}
+
 async function worker(jobFile) {
   let job;
   try { job = JSON.parse(readFileSync(jobFile, 'utf8')); } finally { try { unlinkSync(jobFile); } catch {} }
-  const phrase = job.phrase ?? summarise(job.lastMessage);
-  if (!job.waitIdle) return speak(job, phrase);
-  try {
-    if (await waitUntilIdle(job.sessionId) && isCurrentToken(job.sessionId, job.token)) speak(job, phrase);
-  } finally {
-    clearToken(job.sessionId, job.token);
-  }
+  await announce(job);
 }
 
 function hook() {
@@ -155,10 +175,12 @@ function hook() {
   const jobFile = join(tmpdir(), `cc-speak-${job.token}.json`);
   writeFileSync(jobFile, JSON.stringify(job));
   spawn(process.execPath, [fileURLToPath(import.meta.url), '--worker', jobFile],
-    { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    { detached: true, stdio: 'ignore', windowsHide: true }).on('error', () => {}).unref();
 }
 
-if (import.meta.main) {
+// Not import.meta.main: Node before 22.18 leaves it undefined, so the hook silently did nothing.
+// The test runner loads this file from speak-notify.test.mjs, so the name check keeps it inert.
+if (basename(process.argv[1] || '') === basename(fileURLToPath(import.meta.url))) {
   try {
     const i = process.argv.indexOf('--worker');
     if (i > 0) await worker(process.argv[i + 1]);

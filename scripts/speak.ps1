@@ -46,9 +46,14 @@ if ($terminalWindowHandle -ne [IntPtr]::Zero) {
     if ($isForeground -and -not [SpeakForegroundNative]::IsIconic($terminalWindowHandle)) { return }
 }
 
+# If the lock is not free within two minutes, the holder is hung (a normal turn takes seconds,
+# and a holder that is killed abandons the lock, which counts as owned). Speak anyway: a late
+# overlap beats a lost notification.
 $mutex = New-Object System.Threading.Mutex($false, 'Local\ClaudeCodeSpeak')
 $owned = $false
 try { $owned = $mutex.WaitOne(120000) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
+$player = $null
+$synth = $null
 try {
     $wav = Join-Path $env:WINDIR "Media\$Chime"
     if (Test-Path $wav) {
@@ -61,7 +66,8 @@ try {
     $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
     try { $synth.SelectVoice($Voice) } catch {}
     $synth.Speak($Text)
-    $synth.Dispose()
 } finally {
+    if ($synth) { $synth.Dispose() }
+    if ($player) { $player.Dispose() }
     if ($owned) { $mutex.ReleaseMutex() }
 }

@@ -1,4 +1,4 @@
-// hooks/speak-notify.test.mjs
+// scripts/speak-notify.test.mjs
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
@@ -96,4 +96,53 @@ test('clearToken removes only its own token', () => {
   assert.equal(isCurrentToken('s', 'new', dir), true);
   clearToken('s', 'new', dir);
   assert.equal(existsSync(join(dir, 'speak-s.token')), false);
+});
+
+test('waitUntilIdle treats parked and dead sessions as idle', async () => {
+  const dir = scratch();
+  writeFileSync(join(dir, '9.json'), JSON.stringify({ sessionId: 'parked', status: 'busy', parkedJobId: 'j1' }));
+  writeFileSync(join(dir, '8.json'), JSON.stringify({ sessionId: 'dead', status: 'busy', pid: 2147483646 }));
+  writeFileSync(join(dir, '7.json'), JSON.stringify({ sessionId: 'live', status: 'busy', pid: process.pid }));
+  assert.equal(await waitUntilIdle('parked', dir, 200, 50), true);
+  assert.equal(await waitUntilIdle('dead', dir, 200, 50), true);
+  assert.equal(await waitUntilIdle('live', dir, 200, 50), false);
+});
+
+import { announce } from './speak-notify.mjs';
+
+test('announce: superseded Stop never asks for a summary', async () => {
+  const dir = scratch();
+  writeToken('s', 'newer', dir);
+  let summarised = 0, spoken = 0;
+  await announce({ waitIdle: true, phrase: null, sessionId: 's', token: 'older', lastMessage: 'x' },
+    { summary: () => { summarised++; return 'x'; }, say: () => { spoken++; }, sessionsDir: dir, stateDir: dir });
+  assert.equal(summarised, 0);
+  assert.equal(spoken, 0);
+  assert.equal(isCurrentToken('s', 'newer', dir), true);
+});
+
+test('announce: Stop superseded during the summary stays silent', async () => {
+  const dir = scratch();
+  writeToken('s', 'mine', dir);
+  let spoken = 0;
+  await announce({ waitIdle: true, phrase: null, sessionId: 's', token: 'mine', lastMessage: 'x' },
+    { summary: () => { writeToken('s', 'newer', dir); return 'x'; }, say: () => { spoken++; }, sessionsDir: dir, stateDir: dir });
+  assert.equal(spoken, 0);
+});
+
+test('announce: current Stop speaks its summary and clears its token', async () => {
+  const dir = scratch();
+  writeToken('s', 'mine', dir);
+  let said;
+  await announce({ waitIdle: true, phrase: null, sessionId: 's', token: 'mine', lastMessage: 'x' },
+    { summary: () => 'Tests pass.', say: (job, phrase) => { said = phrase; }, sessionsDir: dir, stateDir: dir });
+  assert.equal(said, 'Tests pass.');
+  assert.equal(existsSync(join(dir, 'speak-s.token')), false);
+});
+
+test('announce: fixed-phrase events speak at once without a summary', async () => {
+  let said;
+  await announce({ waitIdle: false, phrase: 'hit an error.' },
+    { summary: () => assert.fail('no summary'), say: (job, phrase) => { said = phrase; } });
+  assert.equal(said, 'hit an error.');
 });

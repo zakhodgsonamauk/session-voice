@@ -1,7 +1,7 @@
 # Spoken Session Notifications — Design
 
 Date: 2026-10-18
-Status: Approved
+Status: Approved; built, and packaged as the `session-voice` plugin
 
 ## Problem
 
@@ -24,8 +24,9 @@ session's name and a few words about what happened or what is needed.
   used (it requires `ANTHROPIC_API_KEY`), so the child run disables hooks with
   `--settings '{"disableAllHooks":true}'` plus `--no-session-persistence`, and the hook
   also exits early if env `CC_SPEAK_CHILD=1` is set (belt and braces against recursion).
-- **Sound:** short (~1s) chime, then voice. `cc-sounds` plugin disabled.
-- **Voice:** Microsoft Hazel Desktop (built in), via `System.Speech`.
+- **Sound:** short (~1s) chime, then voice. Users of `cc-sounds` should disable it.
+- **Voice:** Microsoft Hazel Desktop (built in), via `System.Speech`; system default if
+  Hazel is missing.
 - **Only when not looking:** reuse cc-sounds' foreground-window check — silent if the
   hosting terminal is the focused, non-minimised window.
 
@@ -34,15 +35,16 @@ session's name and a few words about what happened or what is needed.
 | Event | Spoken |
 |---|---|
 | Stop | "<name>. <haiku summary, ~8 words>" |
-| PermissionRequest | "<name> needs permission to run <tool_name>." |
-| Elicitation | "<name> has a question. <first few words>" |
-| StopFailure | "<name> hit an error." |
+| PreToolUse (AskUserQuestion) | "<name>. has a question. <first words>" |
+| PermissionRequest | "<name>. needs permission to run <tool_name>." |
+| Elicitation | "<name>. has a question. <first words>" |
+| StopFailure | "<name>. hit an error." |
 
 ## Additions found during planning
 
 - **AskUserQuestion:** the user runs with permissions bypassed, so PermissionRequest rarely
   fires. Claude's multiple-choice questions get their own trigger: PreToolUse matcher
-  `AskUserQuestion` → "<name>: has a question. <first words>".
+  `AskUserQuestion`.
 - **Wait for real idle on Stop:** other Stop hooks (stop-gate, plain-words-gate) can block
   the turn and send Claude back to work. The Stop worker waits until the session record's
   `status` is no longer `busy`, and speaks only if no newer Stop for the same session has
@@ -52,30 +54,65 @@ session's name and a few words about what happened or what is needed.
 - **Haiku timeout raised to 20s** and MCP servers skipped (`--strict-mcp-config`) since the
   worker is detached anyway and MCP start-up dominates cold-start time.
 
+## Changes after the first build
+
+- **Packaged as a plugin.** The scripts moved from `~/.claude/hooks/` into this repo's
+  `scripts/`, and the hook registrations moved from the user's `settings.json` into
+  `hooks/hooks.json`, using `${CLAUDE_PLUGIN_ROOT}`. Token files moved to
+  `$CLAUDE_PLUGIN_DATA` (fallback `~/.claude/session-voice`), because the plugin folder is
+  replaced on every update.
+- **Summary after the idle wait.** The worker now waits for idle and checks its token
+  before calling Haiku, then checks the token again before speaking. A turn blocked by
+  another Stop hook no longer starts a summary run whose result is thrown away.
+- **Stuck `busy` records.** A record with `parkedJobId` set, or whose `pid` is no longer
+  running, counts as idle. One session was seen live stuck on `busy` for ~82 hours while
+  parked. A live, unparked session still busy after 5 minutes is dropped: it was sent back to
+  work, and its next Stop announces.
+- **Runs on Node 20.** The entry check no longer uses `import.meta.main`, which is undefined
+  before Node 22.18. On a PATH whose first `node` was 20.9 (a Conda environment), the hook
+  silently did nothing. The script now compares its own file name with `process.argv[1]`.
+- **Tidying.** No-`session_id` events are ignored (no `speak-undefined.token`), job files are
+  deleted even when unreadable, token files are deleted after use, the detached spawn has an
+  error listener, and the speaker disposes the voice and chime player in `finally`.
+- **Lock timeout:** if the speaking lock is not free within 2 minutes, the holder is hung (a
+  killed holder abandons the lock, which counts as owned), so the speaker talks anyway. A
+  late overlap is better than a lost notification.
+
 ## Components
 
-- `~/.claude/hooks/speak-notify.mjs` — single entry for all four events. Reads hook JSON
-  from stdin, resolves the session name, builds the sentence (calling Haiku for Stop),
-  then launches the PowerShell speaker detached so Claude is never blocked.
-- `~/.claude/hooks/speak.ps1` — foreground check, acquires a speaking lock (named mutex)
-  so concurrent sessions take turns, plays a trimmed chime, speaks the text.
-- `settings.json` — registers the hook for Stop, StopFailure, PermissionRequest,
-  Elicitation; sets `cc-sounds@cc-sounds` to false.
+- `scripts/speak-notify.mjs` — single entry for all five registrations. Reads hook JSON
+  from stdin, resolves the session name, writes a job file and launches a detached copy of
+  itself (`--worker`) so Claude is never blocked. The worker waits for idle (Stop only),
+  gets the Haiku summary (Stop only), then runs the speaker.
+- `scripts/speak.ps1` — foreground check, acquires a speaking lock (named mutex
+  `Local\ClaudeCodeSpeak`) so concurrent sessions take turns, plays a 0.9 s chime from
+  `C:\Windows\Media`, speaks the text.
+- `hooks/hooks.json` — registers the hook for Stop, StopFailure, PermissionRequest,
+  Elicitation and PreToolUse (matcher `AskUserQuestion`), 10 s timeout each.
 
 ## Data flow
 
-Hook event → `speak-notify.mjs` (stdin JSON) → name lookup → sentence (Haiku for Stop,
-12s timeout) → spawn detached `powershell -File speak.ps1 "<text>"` → hook exits 0.
+Hook event → `speak-notify.mjs` (stdin JSON) → name lookup → job file in `%TEMP%` → spawn
+detached worker → hook exits 0.
+
+Worker → (Stop: wait for idle, check token, Haiku summary with 20 s timeout, check token
+again) → `powershell -File speak.ps1 -Text "<text>" -Chime <wav> -HostPid <claude pid>`.
 
 ## Error handling
 
-- Haiku timeout/error → first ~10 words of `last_assistant_message` (or transcript's last
-  assistant text if that field is absent).
-- No session record → folder name.
+- Haiku timeout/error → first ~10 words of `last_assistant_message`.
+- No session record → folder name; the foreground check finds no window, so it speaks.
 - Any exception → exit 0 silently; never block or alter Claude's turn.
+
+## Known limits
+
+- The foreground check is per terminal window, not per tab.
+- Non-interactive `claude -p` runs on the same PC have no session record, so they announce
+  under their folder name.
 
 ## Testing
 
+- Unit tests: `node --test scripts/speak-notify.test.mjs`.
 - Pipe sample hook payloads for each event into the script; confirm the sentence and
   that speech plays when the terminal is in the background.
 - Two minimised sessions finishing together: speak in turn, correct names.

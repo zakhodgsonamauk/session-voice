@@ -1,5 +1,12 @@
 # Spoken Session Notifications Implementation Plan
 
+> **Historical record.** This plan built the first version inside `~/.claude/hooks/`, with
+> hooks registered in the user's `settings.json`. It now lives in this repo as a plugin:
+> `hooks/` below means `scripts/`, the settings entries are in `hooks/hooks.json`, and token
+> files go to `$CLAUDE_PLUGIN_DATA`. Code snippets show the first version. The current code
+> differs as described in "Follow-ups done" at the end and in `docs/design.md`. Task 8 is
+> still open.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use orchestrator-supaconductor:executing-plans to implement this plan task-by-task.
 
 **Goal:** Replace the cc-sounds jingle with a short chime plus Windows text-to-speech saying the session's name and a few words about what happened or what is needed.
@@ -636,3 +643,26 @@ No criterion fails. Recommended follow-ups (not blocking):
 - F7 (nit) hooks/state - token files are kept forever (one per session). Delete after speaking.
 - F8 (nit) speak-notify.mjs:150 - no `'error'` listener on the detached spawn.
 - Note: if a session is closed before speaking, the missing record counts as idle and the dead pid finds no window, so it speaks anyway. Acceptable under the spec.
+
+## Follow-ups done (2026-10-18)
+
+| # | Status | What changed |
+|---|---|---|
+| F1 | Done | The worker waits for idle and checks its token before asking Haiku, then checks the token again before speaking (`announce()` in `scripts/speak-notify.mjs`). Tested. |
+| F2 | Done | A record with `parkedJobId`, or whose `pid` is no longer running, counts as idle. A live, unparked session busy for over 5 minutes is still dropped on purpose: its next Stop announces. Tested. |
+| F3 | Done | Events with no `session_id` are ignored. |
+| F4 | Done | The job file is deleted in a `finally`, even if unreadable. |
+| F5 | Decided | Speak anyway after a 2-minute lock wait (a hung holder; a killed one abandons the lock). Comment in `speak.ps1`. |
+| F6 | Done | The voice and the chime player are disposed in `finally`. |
+| F7 | Done | The token file is removed after use, but only if it is still this worker's. Tested. |
+| F8 | Done | Error listener on the detached spawn. |
+
+Found while doing these: the entry check used `import.meta.main`, which is undefined before
+Node 22.18. On this PC the first `node` on the PATH is 20.9 (a Conda environment), and with
+that the hook did nothing at all, as shown by running the previous version. Replaced with a
+file-name check against `process.argv[1]`. 15 of 15 tests pass on Node 20.9 and 25.5. A real
+Stop run under Node 20.9 wrote its token and started the worker, which picked up the job.
+That run was cancelled before it spoke, by replacing the token.
+
+Still unverified (Task 8, needs a person listening): audio in live multi-session use, silence
+when focused, idle wait across a blocked Stop turn, and whether a console window flashes.
