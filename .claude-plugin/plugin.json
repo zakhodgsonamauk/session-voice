@@ -1,0 +1,7 @@
+{
+  "name": "session-voice",
+  "description": "Spoken notifications for Claude Code on Windows: a short chime, then the session's name and a few-word summary of what happened or what it needs, so you can tell several sessions apart. Silent while you are looking at the terminal.",
+  "version": "1.0.0",
+  "author": { "name": "zakhodgsonamauk" },
+  "keywords": ["notifications", "text-to-speech", "hooks", "windows", "multi-session"]
+}

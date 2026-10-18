@@ -1,0 +1,12 @@
+{
+  "name": "session-voice",
+  "description": "Spoken session notifications for Claude Code on Windows.",
+  "owner": { "name": "zakhodgsonamauk" },
+  "plugins": [
+    {
+      "name": "session-voice",
+      "description": "Speaks the session name and a short summary when a Claude Code session finishes or needs you.",
+      "source": "./"
+    }
+  ]
+}
