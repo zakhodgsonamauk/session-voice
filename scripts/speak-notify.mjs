@@ -14,7 +14,11 @@
 // WHY NOT --bare. The summary comes from a hidden `claude -p --model haiku` run so it uses the
 // user's normal Claude Code login. --bare would skip hooks, but it only accepts an API key, so
 // hooks are switched off with --settings instead, and CC_SPEAK_CHILD guards against recursion.
-import { readFileSync, readdirSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
+//
+// MUTING. A session stays silent if MM_VOICE=off or SESSION_VOICE=off is in its environment
+// (Multi-Manager sets MM_VOICE=off in the sessions it launches), or if /voice off left a file in
+// ~/.claude/session-voice/muted. A file in .../unmuted (from /voice on) beats both.
+import { readFileSync, readdirSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { basename, join, dirname } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
@@ -26,6 +30,35 @@ const SESSIONS_DIR = join(homedir(), '.claude', 'sessions');
 // Outside the plugin folder: the plugin cache is replaced on every update.
 const STATE_DIR = process.env.CLAUDE_PLUGIN_DATA || join(homedir(), '.claude', 'session-voice');
 const SPEAKER = join(HERE, 'speak.ps1');
+// Always this fixed path, never CLAUDE_PLUGIN_DATA: Multi-Manager writes these files too.
+export const VOICE_DIR = join(homedir(), '.claude', 'session-voice');
+
+// Session ids are UUIDs. Anything else is refused so a mute file can never land outside its folder.
+export const validSessionId = id => typeof id === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(id);
+
+const isOff = v => String(v || '').trim().toLowerCase() === 'off';
+
+// { muted, reason } for one session. An unmuted file wins, then the environment, then a muted file.
+export function voiceState(sessionId, env = process.env, dir = VOICE_DIR) {
+  const has = sub => validSessionId(sessionId) && existsSync(join(dir, sub, sessionId));
+  if (has('unmuted')) return { muted: false, reason: 'turned on with /voice on' };
+  if (isOff(env.MM_VOICE)) return { muted: true, reason: 'MM_VOICE=off (started by Multi-Manager)' };
+  if (isOff(env.SESSION_VOICE)) return { muted: true, reason: 'SESSION_VOICE=off' };
+  if (has('muted')) return { muted: true, reason: 'turned off with /voice off' };
+  return { muted: false, reason: 'default' };
+}
+
+export const isMuted = (sessionId, env, dir) => voiceState(sessionId, env, dir).muted;
+
+// on: remove the muted file and write an unmuted one, so /voice on beats MM_VOICE=off.
+// off: the reverse.
+export function setVoice(sessionId, on, dir = VOICE_DIR) {
+  if (!validSessionId(sessionId)) throw new Error(`not a session id: ${sessionId}`);
+  const [add, drop] = on ? ['unmuted', 'muted'] : ['muted', 'unmuted'];
+  try { unlinkSync(join(dir, drop, sessionId)); } catch {}
+  mkdirSync(join(dir, add), { recursive: true });
+  writeFileSync(join(dir, add, sessionId), new Date().toISOString() + '\n');
+}
 
 export function speakableName(name) {
   return String(name || '').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim() || 'Claude';
@@ -136,13 +169,14 @@ function speak(job, phrase) {
 
 // On Stop, wait for real idle before asking Haiku, so a turn another Stop hook blocks costs no
 // summary run. The token is checked again afterwards because the summary takes a few seconds.
-export async function announce(job, { say = speak, summary = summarise, sessionsDir = SESSIONS_DIR, stateDir = STATE_DIR } = {}) {
-  if (!job.waitIdle) return say(job, job.phrase ?? summary(job.lastMessage));
+// Muting is checked again just before speaking: /voice off may run while the worker waits.
+export async function announce(job, { say = speak, summary = summarise, sessionsDir = SESSIONS_DIR, stateDir = STATE_DIR, muted = () => isMuted(job.sessionId) } = {}) {
+  if (!job.waitIdle) return muted() ? undefined : say(job, job.phrase ?? summary(job.lastMessage));
   const current = () => isCurrentToken(job.sessionId, job.token, stateDir);
   try {
-    if (!(await waitUntilIdle(job.sessionId, sessionsDir)) || !current()) return;
+    if (!(await waitUntilIdle(job.sessionId, sessionsDir)) || !current() || muted()) return;
     const phrase = job.phrase ?? summary(job.lastMessage);
-    if (current()) say(job, phrase);
+    if (current() && !muted()) say(job, phrase);
   } finally {
     clearToken(job.sessionId, job.token, stateDir);
   }
@@ -159,7 +193,7 @@ function hook() {
   let input;
   try { input = JSON.parse(readFileSync(0, 'utf8')); } catch { return; }
   const plan = eventPlan(input);
-  if (!plan || !input.session_id) return;
+  if (!plan || !input.session_id || isMuted(input.session_id)) return;
   const rec = findSession(input.session_id);
   const job = {
     ...plan,

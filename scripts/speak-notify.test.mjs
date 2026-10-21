@@ -146,3 +146,64 @@ test('announce: fixed-phrase events speak at once without a summary', async () =
     { summary: () => assert.fail('no summary'), say: (job, phrase) => { said = phrase; } });
   assert.equal(said, 'hit an error.');
 });
+
+import { voiceState, isMuted, setVoice, validSessionId } from './speak-notify.mjs';
+import { run as voiceCommand, parseArgs } from './voice.mjs';
+
+test('voiceState: speaks by default, MM_VOICE or SESSION_VOICE=off mutes', () => {
+  const dir = scratch();
+  assert.equal(isMuted('s1', {}, dir), false);
+  assert.equal(isMuted('s1', { MM_VOICE: 'off' }, dir), true);
+  assert.equal(isMuted('s1', { SESSION_VOICE: 'OFF' }, dir), true);
+  assert.equal(isMuted('s1', { MM_VOICE: 'on' }, dir), false);
+});
+
+test('setVoice: off writes a muted file, on beats the environment', () => {
+  const dir = scratch();
+  setVoice('s1', false, dir);
+  assert.equal(existsSync(join(dir, 'muted', 's1')), true);
+  assert.equal(isMuted('s1', {}, dir), true);
+  assert.equal(isMuted('s2', {}, dir), false);
+  setVoice('s1', true, dir);
+  assert.equal(existsSync(join(dir, 'muted', 's1')), false);
+  assert.equal(isMuted('s1', { MM_VOICE: 'off' }, dir), false);
+  setVoice('s1', false, dir);
+  assert.equal(existsSync(join(dir, 'unmuted', 's1')), false);
+  assert.equal(voiceState('s1', {}, dir).reason, 'turned off with /voice off');
+});
+
+test('session ids that could escape the folder are refused', () => {
+  assert.equal(validSessionId('8d234bb8-58f7-4414-a349-d1004754f603'), true);
+  assert.equal(validSessionId('../x'), false);
+  assert.equal(validSessionId(''), false);
+  assert.throws(() => setVoice('../x', false, scratch()));
+});
+
+test('announce: a muted session stays silent', async () => {
+  let spoken = 0;
+  await announce({ waitIdle: false, phrase: 'hit an error.' }, { say: () => { spoken++; }, muted: () => true });
+  const dir = scratch();
+  writeToken('s', 'mine', dir);
+  await announce({ waitIdle: true, phrase: null, sessionId: 's', token: 'mine', lastMessage: 'x' },
+    { summary: () => assert.fail('no summary'), say: () => { spoken++; }, sessionsDir: dir, stateDir: dir, muted: () => true });
+  assert.equal(spoken, 0);
+  assert.equal(existsSync(join(dir, 'speak-s.token')), false);
+});
+
+test('/voice takes the session id from --session, else CLAUDE_CODE_SESSION_ID', () => {
+  assert.deepEqual(parseArgs(['off', '--session=abc'], {}), { action: 'off', session: 'abc' });
+  assert.deepEqual(parseArgs(['--session='], { CLAUDE_CODE_SESSION_ID: 'env1' }), { action: 'status', session: 'env1' });
+  assert.equal(parseArgs(['on', '--session=${CLAUDE_SESSION_ID}'], { CLAUDE_CODE_SESSION_ID: 'env1' }).session, 'env1');
+});
+
+test('/voice on, off and status act on the current session', () => {
+  const dir = scratch();
+  const env = { CLAUDE_CODE_SESSION_ID: 's1', MM_VOICE: 'off' };
+  assert.match(voiceCommand(['status'], env, dir).text, /off .*MM_VOICE/);
+  assert.match(voiceCommand(['on'], env, dir).text, /^Voice is on/);
+  assert.equal(existsSync(join(dir, 'unmuted', 's1')), true);
+  assert.match(voiceCommand(['off'], env, dir).text, /^Voice is off/);
+  assert.equal(existsSync(join(dir, 'muted', 's1')), true);
+  assert.equal(voiceCommand(['loud'], env, dir).code, 1);
+  assert.equal(voiceCommand(['on'], {}, dir).code, 1);
+});
